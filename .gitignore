@@ -1,0 +1,16 @@
+node_modules/
+dist/
+npm-debug.log
+yarn-error.log
+yarn.lock
+package-lock.json
+.pnpm/
+pnpm-lock.yaml
+pnpm-workspace.yaml
+pnpmfile.js
+pnpm-debug.log
+pnpm-error.log
+pnpm.log
+.env
+.env*
+coverage/
