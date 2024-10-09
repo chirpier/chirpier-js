@@ -14,3 +14,4 @@ pnpm.log
 .env
 .env*
 coverage/
+.DS_Store
