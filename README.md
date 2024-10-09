@@ -13,7 +13,7 @@ The Chirpier SDK is a lightweight, versatile library for monitoring and tracking
 
 You can install the Chirpier SDK via npm:
 ```
-npm install @chirpier/sdk
+npm install @chirpier/chirpier-js
 ```
 
 ## Getting Started
@@ -24,7 +24,7 @@ To start using the SDK, you need to initialize it with your API key. The SDK wor
 
 #### In a Browser
 ```
-import { initialize, monitor } from '@chirpier/sdk-js';
+import { initialize, monitor } from '@chirpier/chirpier-js';
 
 // Initialize the SDK with your API key
 initialize({ key: 'your-api-key' });
@@ -40,7 +40,7 @@ monitor({
 #### In a Server (e.g., Express.js)
 ```
 const express = require('express');
-const { initialize, monitor } = require('@chirpier/sdk-js');
+const { initialize, monitor } = require('@chirpier/chirpier-js');
 
 const app = express();
 const port = 3000;
@@ -85,7 +85,3 @@ monitor({
 Handling Offline Scenarios
 
 The SDK automatically queues events when the network is unavailable and sends them when the connection is restored.
-
-## Custom Storage Mechanisms
-
-The SDK uses localStorage for browser environments and in memory storage for Node.js. If you need a custom storage mechanism, you can extend the SDK by implementing the Storage interface.
