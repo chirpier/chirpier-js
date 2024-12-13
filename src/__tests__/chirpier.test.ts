@@ -1,4 +1,4 @@
-import { Chirpier, ChirpierError, Event, initialize, monitor } from "../index";
+import { Chirpier, ChirpierError, Event, LogLevel, initialize, monitor } from "../index";
 import {
   DEFAULT_API_ENDPOINT,
   DEFAULT_RETRIES,
@@ -13,7 +13,7 @@ describe("Chirpier SDK", () => {
   describe("Initialization", () => {
     test("should throw error if monitor is called before initialize", () => {
       const event: Event = {
-        group_id: "f3438ee9-b964-48aa-b938-a803df440a3c",
+        group_id: "bfd9299d-817a-452f-bc53-6e154f2281fc",
         stream_name: "test-stream",
         value: 1,
       };
@@ -27,6 +27,7 @@ describe("Chirpier SDK", () => {
     test("should initialize with default values", () => {
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        logLevel: LogLevel.None
       });
       const chirpier = Chirpier.getInstance({} as any);
 
@@ -38,7 +39,7 @@ describe("Chirpier SDK", () => {
       expect(chirpier?.["retries"]).toBe(DEFAULT_RETRIES);
       expect(chirpier?.["timeout"]).toBe(DEFAULT_TIMEOUT);
       expect(chirpier?.["batchSize"]).toBe(DEFAULT_BATCH_SIZE);
-      expect(chirpier?.["flushTimeout"]).toBe(DEFAULT_FLUSH_DELAY);
+      expect(chirpier?.["flushDelay"]).toBe(DEFAULT_FLUSH_DELAY);
 
       Chirpier.stop();
     });
@@ -47,11 +48,13 @@ describe("Chirpier SDK", () => {
       expect(() => {
         initialize({
           key: "api_key",
+          logLevel: LogLevel.None
         });
       }).toThrow(ChirpierError);
       expect(() => {
         initialize({
           key: "api_key",
+          logLevel: LogLevel.None
         });
       }).toThrow("Invalid API key: Not a valid JWT");
     });
@@ -65,10 +68,11 @@ describe("Chirpier SDK", () => {
 
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        logLevel: LogLevel.None
       });
 
       const event: Event = {
-        group_id: "f3438ee9-b964-48aa-b938-a803df440a3c",
+        group_id: "bfd9299d-817a-452f-bc53-6e154f2281fc",
         stream_name: "test-stream",
         value: 1,
       };
@@ -81,7 +85,7 @@ describe("Chirpier SDK", () => {
       expect(mock.history.post[0].url).toBe(DEFAULT_API_ENDPOINT);
       expect(JSON.parse(mock.history.post[0].data)).toEqual([
         {
-          group_id: "f3438ee9-b964-48aa-b938-a803df440a3c",
+          group_id: "bfd9299d-817a-452f-bc53-6e154f2281fc",
           stream_name: "test-stream",
           value: 1,
         },
@@ -95,11 +99,12 @@ describe("Chirpier SDK", () => {
     test("should throw error for invalid event", async () => {
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        logLevel: LogLevel.None
       });
       const chirpier = Chirpier.getInstance({} as any);
 
       const invalidEvent = {
-        group_id: "f3438ee9-b964-48aa-b938-a803df440a3c",
+        group_id: "bfd9299d-817a-452f-bc53-6e154f2281fc",
       } as any;
       await expect(chirpier?.monitor(invalidEvent)).rejects.toThrow(
         ChirpierError
@@ -115,10 +120,11 @@ describe("Chirpier SDK", () => {
 
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        logLevel: LogLevel.None
       });
 
       const event: Event = {
-        group_id: "f3438ee9-b964-48aa-b938-a803df440a3c",
+        group_id: "bfd9299d-817a-452f-bc53-6e154f2281fc",
         stream_name: "test-stream",
         value: 1,
       };
@@ -141,10 +147,11 @@ describe("Chirpier SDK", () => {
 
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        logLevel: LogLevel.None
       });
 
       const event: Event = {
-        group_id: "f3438ee9-b964-48aa-b938-a803df440a3c",
+        group_id: "bfd9299d-817a-452f-bc53-6e154f2281fc",
         stream_name: "test-stream",
         value: 1,
       };

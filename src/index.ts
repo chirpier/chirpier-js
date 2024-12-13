@@ -8,11 +8,22 @@ import {
   DEFAULT_TIMEOUT,
   DEFAULT_BATCH_SIZE,
   DEFAULT_FLUSH_DELAY,
+  MAX_QUEUE_SIZE,
 } from "./constants";
+import AsyncLock from "async-lock";
+
+// Define logging levels
+export enum LogLevel {
+  None = 0,
+  Error = 1,
+  Info = 2,
+  Debug = 3,
+}
 
 // Define the options interface for Chirpier initialization
 interface Options {
   key: string;
+  logLevel?: LogLevel;
 }
 
 // Define the Event interface for monitoring
@@ -31,6 +42,12 @@ export class ChirpierError extends Error {
   }
 }
 
+interface QueuedEvent {
+  event: Event;
+  timestamp: number;
+  retryCount: number;
+}
+
 /**
  * Main Chirpier class for monitoring events.
  */
@@ -41,30 +58,32 @@ export class Chirpier {
   private readonly retries: number;
   private readonly timeout: number;
   private readonly axiosInstance: AxiosInstance;
-  private eventQueue: Event[] = [];
+  private eventQueue: QueuedEvent[] = [];
   private readonly batchSize: number;
-  private readonly flushTimeout: number;
+  private readonly flushDelay: number;
   private flushTimeoutId: NodeJS.Timeout | null = null;
+  private readonly queueLock = new AsyncLock();
+  private readonly flushLock = new AsyncLock();
+  private readonly logLevel: LogLevel;
 
   /**
    * Initializes a new instance of the Chirpier class.
    * @param options - Configuration options for the SDK.
    */
   private constructor(options: Options) {
-    const {
-      key,
-    } = options;
+    const { key, logLevel = LogLevel.None } = options;
 
     if (!key || typeof key !== "string") {
       throw new ChirpierError("API key is required and must be a string");
     }
-    
+
     this.apiKey = key;
     this.apiEndpoint = DEFAULT_API_ENDPOINT;
     this.retries = DEFAULT_RETRIES;
     this.timeout = DEFAULT_TIMEOUT;
     this.batchSize = DEFAULT_BATCH_SIZE;
-    this.flushTimeout = DEFAULT_FLUSH_DELAY;
+    this.flushDelay = DEFAULT_FLUSH_DELAY;
+    this.logLevel = logLevel;
 
     // Create axios instance with authorization header
     this.axiosInstance = axios.create({
@@ -137,13 +156,21 @@ export class Chirpier {
       );
     }
 
-    this.eventQueue.push(event);
+    await this.queueLock.acquire("queue", async () => {
+      if (this.eventQueue.length >= MAX_QUEUE_SIZE) {
+        throw new ChirpierError("Event queue is full.");
+      }
+
+      this.eventQueue.push({ event, timestamp: Date.now(), retryCount: 0 });
+    });
 
     if (this.eventQueue.length >= this.batchSize) {
-      console.info(`Batch size reached. Flushing queue.`);
       await this.flushQueue();
     } else if (!this.flushTimeoutId) {
-      this.flushTimeoutId = setTimeout(() => this.flushQueue(), this.flushTimeout);
+      this.flushTimeoutId = setTimeout(
+        () => this.flushQueue(),
+        this.flushDelay
+      );
     }
   }
 
@@ -151,24 +178,65 @@ export class Chirpier {
    * Flushes the event queue by sending all events to the API.
    */
   private async flushQueue(): Promise<void> {
-    if (this.flushTimeoutId) {
-      clearTimeout(this.flushTimeoutId);
-      this.flushTimeoutId = null;
-    }
+    // Acquire the flush lock
+    await this.flushLock.acquire("flush", async () => {
+      let eventsToSend: QueuedEvent[] = [];
 
-    if (this.eventQueue.length === 0) {
-      return;
-    }
+      // Extract events from the queue under the queue lock
+      await this.queueLock.acquire("eventQueue", async () => {
+        if (this.eventQueue.length > 0) {
+          eventsToSend = [...this.eventQueue];
+          this.eventQueue = [];
+        }
+      });
 
-    const eventsToSend = [...this.eventQueue];
-    this.eventQueue = [];
+      if (eventsToSend.length === 0) {
+        return;
+      }
 
-    try {
-      await this.sendEvents(eventsToSend);
-      console.info(`Successfully sent ${eventsToSend.length} events`);
-    } catch (error) {
-      console.error("Failed to send events:", error);
-    }
+      try {
+        // Clear any pending flush timeout
+        if (this.flushTimeoutId) {
+          clearTimeout(this.flushTimeoutId);
+          this.flushTimeoutId = null;
+        }
+
+        // Attempt to send events
+        await this.sendEvents(eventsToSend.map((qe) => qe.event));
+
+        if (this.logLevel >= LogLevel.Info) {
+          console.info(`Successfully sent ${eventsToSend.length} events`);
+        }
+      } catch (error) {
+        // Log failure
+        if (this.logLevel >= LogLevel.Error) {
+          console.error("Failed to send events:", error);
+        }
+
+        // Requeue failed events with retry count checks
+        const retryableEvents: QueuedEvent[] = [];
+        for (const queuedEvent of eventsToSend) {
+          if (queuedEvent.retryCount >= this.retries) {
+            if (this.logLevel >= LogLevel.Error) {
+              console.error(
+                `Dropping event after ${this.retries} retries:`,
+                queuedEvent.event
+              );
+            }
+            continue; // Skip adding this event back to the queue
+          }
+
+          // Increment retry count and add back to the queue
+          queuedEvent.retryCount++;
+          retryableEvents.push(queuedEvent);
+        }
+
+        // Requeue remaining retryable events
+        await this.queueLock.acquire("eventQueue", async () => {
+          this.eventQueue = [...retryableEvents, ...this.eventQueue];
+        });
+      }
+    });
   }
 
   /**
@@ -178,9 +246,9 @@ export class Chirpier {
   private async sendEvents(events: Event[]): Promise<void> {
     await this.axiosInstance.post(this.apiEndpoint, events);
   }
-  
+
   // Stop the timeout and uninitialize the Chirpier instance
-  public static stop(): void {
+  public static async stop(): Promise<void> {
     if (!Chirpier.instance) {
       return;
     }
@@ -189,7 +257,7 @@ export class Chirpier {
       Chirpier.instance.flushTimeoutId = null;
     }
     // Flush any remaining events in the queue
-    Chirpier.instance.flushQueue();
+    await Chirpier.instance.flushQueue();
     // Uninitialize the Chirpier instance
     Chirpier.instance = null;
   }
@@ -243,12 +311,16 @@ export function initialize(options: Options): void {
     Chirpier.getInstance(options);
   } catch (error) {
     if (error instanceof ChirpierError) {
-      console.error("Failed to initialize Chirpier SDK:", error.message);
+      if (options.logLevel && options.logLevel >= LogLevel.Error) {
+        console.error("Failed to initialize Chirpier SDK:", error.message);
+      }
     } else {
-      console.error(
-        "An unexpected error occurred during Chirpier SDK initialization:",
-        error
-      );
+      if (options.logLevel && options.logLevel >= LogLevel.Error) {
+        console.error(
+          "An unexpected error occurred during Chirpier SDK initialization:",
+          error
+        );
+      }
     }
     throw error;
   }
@@ -265,7 +337,7 @@ export function monitor(event: Event): void {
       "Chirpier SDK is not initialized. Please call initialize() first."
     );
   }
-  
+
   instance.monitor(event).catch((error) => {
     console.error("Error in monitor function:", error);
   });
