@@ -34,7 +34,7 @@ initialize({ key: 'your-api-key' });
 // Send a data stream tied to a group of streams
 monitor({
   group_id: '02e4f4d8-415e-4fc1-b01a-677ac5bc9207',
-  stream_name: 'Sales',
+  stream_name: 'My measurement',
   value: 15.30,
 } as Event);
 ```
@@ -79,7 +79,7 @@ initialize({ key: 'your-api-key' });
 
 // Monitor an event
 monitor({
-  group_id: 'group UUID',
+  group_id: '02e4f4d8-415e-4fc1-b01a-677ac5bc9207',
   stream_name: 'My measurement',
   value: 15.3,
 });
