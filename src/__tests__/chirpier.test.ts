@@ -1,4 +1,11 @@
-import { Chirpier, ChirpierError, Event, LogLevel, initialize, monitor } from "../index";
+import {
+  Chirpier,
+  ChirpierError,
+  Event,
+  LogLevel,
+  initialize,
+  monitor,
+} from "../index";
 import {
   DEFAULT_API_ENDPOINT,
   DEFAULT_RETRIES,
@@ -27,9 +34,11 @@ describe("Chirpier SDK", () => {
     test("should initialize with default values", () => {
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        logLevel: LogLevel.None
+        logLevel: LogLevel.None,
       });
-      const chirpier = Chirpier.getInstance({} as any);
+      const chirpier = Chirpier.getInstance({
+        key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      });
 
       // Setup mock server
       const mock = new MockAdapter(axios);
@@ -48,13 +57,13 @@ describe("Chirpier SDK", () => {
       expect(() => {
         initialize({
           key: "api_key",
-          logLevel: LogLevel.None
+          logLevel: LogLevel.None,
         });
       }).toThrow(ChirpierError);
       expect(() => {
         initialize({
           key: "api_key",
-          logLevel: LogLevel.None
+          logLevel: LogLevel.None,
         });
       }).toThrow("Invalid API key: Not a valid JWT");
     });
@@ -68,7 +77,7 @@ describe("Chirpier SDK", () => {
 
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        logLevel: LogLevel.None
+        logLevel: LogLevel.None,
       });
 
       const event: Event = {
@@ -96,21 +105,34 @@ describe("Chirpier SDK", () => {
       Chirpier.stop();
     });
 
-    test("should throw error for invalid event", async () => {
+    test("should silently drop invalid event", async () => {
+      const mock = new MockAdapter(axios);
+      mock.onPost(DEFAULT_API_ENDPOINT).reply(200, { success: true });
+
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        logLevel: LogLevel.None
+        logLevel: LogLevel.Debug,
       });
-      const chirpier = Chirpier.getInstance({} as any);
 
       const invalidEvent = {
-        group_id: "bfd9299d-817a-452f-bc53-6e154f2281fc",
-      } as any;
-      await expect(chirpier?.monitor(invalidEvent)).rejects.toThrow(
-        ChirpierError
-      );
+        group_id: "invalid-uuid",
+        stream_name: "",
+        value: 0,
+      } as Event;
 
-      // Clean up the mock
+      const consoleSpy = jest.spyOn(console, "debug");
+
+      await monitor(invalidEvent);
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Invalid event format, dropping event:",
+        invalidEvent
+      );
+      expect(mock.history.post.length).toBe(0); // No request should be made
+
+      // Clean up
+      mock.reset();
+      consoleSpy.mockRestore();
       Chirpier.stop();
     });
 
@@ -120,7 +142,7 @@ describe("Chirpier SDK", () => {
 
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        logLevel: LogLevel.None
+        logLevel: LogLevel.None,
       });
 
       const event: Event = {
@@ -147,7 +169,7 @@ describe("Chirpier SDK", () => {
 
       initialize({
         key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-        logLevel: LogLevel.None
+        logLevel: LogLevel.None,
       });
 
       const event: Event = {

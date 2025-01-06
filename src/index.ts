@@ -3,7 +3,6 @@ import axios, { AxiosInstance } from "axios";
 import axiosRetry from "axios-retry";
 import { Base64 } from "js-base64";
 import {
-  DEFAULT_API_ENDPOINT,
   DEFAULT_RETRIES,
   DEFAULT_TIMEOUT,
   DEFAULT_BATCH_SIZE,
@@ -23,6 +22,7 @@ export enum LogLevel {
 // Define the options interface for Chirpier initialization
 interface Options {
   key: string;
+  region?: "us-west" | "eu-west" | "asia-southeast";
   logLevel?: LogLevel;
 }
 
@@ -71,14 +71,18 @@ export class Chirpier {
    * @param options - Configuration options for the SDK.
    */
   private constructor(options: Options) {
-    const { key, logLevel = LogLevel.None } = options;
+    const { key, region = "events", logLevel = LogLevel.None } = options;
 
     if (!key || typeof key !== "string") {
       throw new ChirpierError("API key is required and must be a string");
     }
 
+    if (typeof region !== "string" && !["us-west", "eu-west", "asia-southeast", "events"].includes(region)) {
+      throw new ChirpierError("Region must be one of: us-west, eu-west, asia-southeast, events");
+    }
+
+    this.apiEndpoint = `https://${region}.chirpier.co/v1.0/events`;
     this.apiKey = key;
-    this.apiEndpoint = DEFAULT_API_ENDPOINT;
     this.retries = DEFAULT_RETRIES;
     this.timeout = DEFAULT_TIMEOUT;
     this.batchSize = DEFAULT_BATCH_SIZE;
@@ -107,8 +111,11 @@ export class Chirpier {
         return Math.pow(2, retryCount) * 1000; // Exponential backoff starting at 1 second
       },
       retryCondition: (error) => {
+        // Retry on network errors, 5xx errors, and 429 (Too Many Requests)
         return (
-          axiosRetry.isNetworkError(error) || axiosRetry.isRetryableError(error)
+          axiosRetry.isNetworkError(error) || 
+          axiosRetry.isRetryableError(error) ||
+          ((error.response && error.response.status) === 429)
         );
       },
       shouldResetTimeout: true,
@@ -151,15 +158,19 @@ export class Chirpier {
    */
   public async monitor(event: Event): Promise<void> {
     if (!this.isValidEvent(event)) {
-      throw new ChirpierError(
-        "Invalid event format. Must include group_id, stream_name, and numeric value."
-      );
+      if (this.logLevel >= LogLevel.Debug) {
+        console.debug("Invalid event format, dropping event:", event);
+      }
+      return; // Silently drop the event
     }
 
     await this.queueLock.acquire("queue", async () => {
       if (this.eventQueue.length >= MAX_QUEUE_SIZE) {
-        throw new ChirpierError("Event queue is full.");
-      }
+        if (this.logLevel >= LogLevel.Debug) {
+          console.debug("Event queue is full, dropping event:", event);
+        }
+        return; // Silently drop the event
+        }
 
       this.eventQueue.push({ event, timestamp: Date.now(), retryCount: 0 });
     });
@@ -294,6 +305,7 @@ function isValidJWT(token: string): boolean {
     const payload = JSON.parse(base64UrlDecode(parts[1]));
     return typeof header === "object" && typeof payload === "object";
   } catch (error) {
+    console.error("Failed to validate JWT:", error);
     return false;
   }
 }
