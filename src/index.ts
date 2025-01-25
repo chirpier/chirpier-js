@@ -62,8 +62,12 @@ export class Chirpier {
   private readonly batchSize: number;
   private readonly flushDelay: number;
   private flushTimeoutId: NodeJS.Timeout | null = null;
-  private readonly queueLock = new AsyncLock();
-  private readonly flushLock = new AsyncLock();
+  private readonly queueLock = new AsyncLock({
+    maxPending: MAX_QUEUE_SIZE,
+  });
+  private readonly flushLock = new AsyncLock({
+    maxPending: MAX_QUEUE_SIZE,
+  });
   private readonly logLevel: LogLevel;
 
   /**
@@ -71,14 +75,19 @@ export class Chirpier {
    * @param options - Configuration options for the SDK.
    */
   private constructor(options: Options) {
-    const { key, region = "events", logLevel = LogLevel.None } = options;
+    const { key, region = "eu-west", logLevel = LogLevel.None } = options;
 
     if (!key || typeof key !== "string") {
       throw new ChirpierError("API key is required and must be a string");
     }
 
-    if (typeof region !== "string" && !["us-west", "eu-west", "asia-southeast", "events"].includes(region)) {
-      throw new ChirpierError("Region must be one of: us-west, eu-west, asia-southeast, events");
+    if (
+      typeof region !== "string" &&
+      !["us-west", "eu-west", "asia-southeast"].includes(region)
+    ) {
+      throw new ChirpierError(
+        "Region must be one of: us-west, eu-west, asia-southeast"
+      );
     }
 
     this.apiEndpoint = `https://${region}.chirpier.co/v1.0/events`;
@@ -113,9 +122,9 @@ export class Chirpier {
       retryCondition: (error) => {
         // Retry on network errors, 5xx errors, and 429 (Too Many Requests)
         return (
-          axiosRetry.isNetworkError(error) || 
+          axiosRetry.isNetworkError(error) ||
           axiosRetry.isRetryableError(error) ||
-          ((error.response && error.response.status) === 429)
+          (error.response && error.response.status) === 429
         );
       },
       shouldResetTimeout: true,
@@ -170,7 +179,7 @@ export class Chirpier {
           console.debug("Event queue is full, dropping event:", event);
         }
         return; // Silently drop the event
-        }
+      }
 
       this.eventQueue.push({ event, timestamp: Date.now(), retryCount: 0 });
     });
