@@ -1,155 +1,227 @@
 # Chirpier SDK
 
-The Chirpier SDK for JavaScript is a simple, lightweight, and efficient SDK to emit event data to Chirpier direct from your JavaScript applications.
-
-## Features
-
-- Easy-to-use API for sending events to Chirpier
-- Automatic batching of events for improved performance
-- Automatic retry mechanism with exponential backoff
-- Thread-safe operations
-- Periodic flushing of the event queue
-- Environment Agnostic: Works seamlessly in both browser and Node.js environments.
+The Chirpier SDK for JavaScript sends OpenClaw-friendly flat events to Chirpier/Ingres with automatic batching and retries.
 
 ## Installation
 
-Install Chirpier SDK using npm:
-
-``` bash
+<!-- docs:start install -->
+```bash
 npm install @chirpier/chirpier-js
 ```
+<!-- docs:end install -->
 
-## Getting Started
+## Quick Start
 
-### Initializing the SDK
+<!-- docs:start quickstart -->
+### Singleton API
 
-To start using the SDK, you need to initialize it with your API key. The SDK works in both browser and Node.js environments.
+```ts
+import { initialize, logEvent, stop } from "@chirpier/chirpier-js";
 
-Here's a quick example of how to use the Chirpier SDK:
+initialize({ key: "chp_your_api_key" });
 
-#### In a Browser
-
-```js
-import { initialize, monitor, Event } from '@chirpier/chirpier-js';
-
-// Initialize the SDK with your API key
-initialize({ key: 'your-api-key' });
-
-// Send a data stream tied to a group of streams
-monitor({
-  group_id: '02e4f4d8-415e-4fc1-b01a-677ac5bc9207',
-  stream_name: 'My measurement',
-  value: 15.30,
-} as Event);
-```
-
-#### In a Server (e.g., Express.js)
-
-```js
-const express = require('express');
-const { initialize, monitor, Event } = require('@chirpier/chirpier-js');
-
-const app = express();
-const port = 3000;
-
-// Initialize the SDK with your API key
-initialize({ key: 'your-api-key', region: 'us-west' });
-
-app.use(express.json());
-
-app.post('/monitor', (req, res) => {
-  const { group_id, stream_name, value } = req.body;
-
-  if (!group_id || !stream_name || !value) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
-  // Monitor an event
-  monitor({ group_id, stream_name, value } as Event);
-
-  res.status(200).json({ message: 'Event tracked successfully' });
+await logEvent({
+  agent_id: "openclaw.main",
+  event: "tool.errors.count",
+  value: 1,
+  meta: { tool_name: "browser.open", workflow: "triage" },
 });
 
-app.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
+await stop();
+```
+
+### Instance API (Recommended)
+
+```ts
+import { createClient } from "@chirpier/chirpier-js";
+
+const client = createClient({ key: "chp_your_api_key" });
+
+await client.log({
+  agent_id: "openclaw.main",
+  event: "task.duration_ms",
+  value: 420,
+  meta: { task_name: "email_triage", result: "success" },
+});
+
+await client.flush();
+await client.shutdown();
+```
+<!-- docs:end quickstart -->
+
+## API
+
+### `initialize(config)`
+
+Initializes the SDK singleton.
+
+`config`:
+- `key` (string, optional): API key. Must start with `chp_`.
+- `apiEndpoint` (string, optional): Full ingestion endpoint override.
+- `servicerEndpoint` (string, optional): Control-plane endpoint override. Defaults to `https://api.chirpier.co/v1.0`.
+- `logLevel` (enum, optional): `None | Error | Info | Debug`.
+- `retries` (number, optional): Retry attempts.
+- `timeout` (number, optional): HTTP timeout in ms.
+- `batchSize` (number, optional): Flush size threshold.
+- `flushDelay` (number, optional): Flush interval in ms.
+- `maxQueueSize` (number, optional): In-memory queue capacity.
+
+API key resolution precedence (when `key` is omitted):
+1. `CHIRPIER_API_KEY` from process environment
+2. `CHIRPIER_API_KEY` from `.env` in current working directory
+
+Default ingest endpoint is `https://logs.chirpier.co/v1.0/logs`.
+Default servicer endpoint is `https://api.chirpier.co/v1.0`.
+The same bearer token is used for both ingest and servicer APIs.
+
+### `logEvent(log)`
+
+Queues a log for batched delivery.
+
+Example with `occurred_at`:
+
+```ts
+await logEvent({
+  agent_id: "openclaw.main",
+  event: "tokens.used",
+  value: 1530,
+  occurred_at: "2026-03-05T14:30:00Z",
 });
 ```
 
-### Usage
+`log`:
+- `agent_id` (string, optional): Free-form agent identifier text.
+- `event` (string, required): Event name.
+- `value` (number, required): Numeric value.
+- `occurred_at` (string | Date, optional): Event occurrence timestamp.
+- `meta` (JSON, optional): Additional JSON-encodable metadata.
 
-```js
-// Initialize the SDK with your API key
-initialize({ key: 'your-api-key', region: 'us-west' });
+Notes:
+- `agent_id` whitespace-only values are treated as omitted.
+- `event` must be non-empty after trimming.
+- `occurred_at` must be within the last 30 days and no more than 1 day in the future.
+- Use ISO8601 UTC timestamps, such as `2026-03-05T14:30:00Z`, or pass a `Date` instance.
+- `meta` must be JSON-encodable.
+- Unknown events are auto-created in Ingres as event definitions.
 
-// Monitor an event
-monitor({
-  group_id: '02e4f4d8-415e-4fc1-b01a-677ac5bc9207',
-  stream_name: 'My measurement',
-  value: 15.3,
+### `flush()`
+
+Flushes pending logs for the initialized singleton without shutting down.
+
+### `createClient(config)`
+
+Creates a standalone `Client` instance (no global singleton state).
+
+<!-- docs:start common-tasks -->
+Client methods:
+- `client.log(log)`: Queue a log.
+- `client.flush()`: Flush queued logs.
+- `client.shutdown()`: Flush and release timers/resources.
+- `client.close()`: Alias of `client.shutdown()`.
+- `client.listEvents()`: List event definitions using the servicer API.
+- `client.getEvent(eventID)`: Read one event definition.
+- `client.updateEvent(eventID, payload)`: Update event definition metadata.
+- `client.listPolicies()`: List monitors/policies.
+- `client.createPolicy(payload)`: Create a monitor/policy.
+- `client.listAlerts(status?)`: List alerts, optionally filtered by status.
+- `client.getAlertDeliveries(alertID, { kind, limit, offset })`: Read alert delivery attempts. Defaults to real alerts only; use `kind: "test"` or `kind: "all"` as needed.
+- `client.acknowledgeAlert(alertID)`: Acknowledge an alert.
+- `client.resolveAlert(alertID)`: Resolve an alert.
+- `client.archiveAlert(alertID)`: Archive an alert.
+- `client.testWebhook(webhookID)`: Send a connector test message.
+- `client.getEventLogs(eventID, { period, limit, offset })`: Read minute/hour/day event rollups.
+<!-- docs:end common-tasks -->
+
+### OpenClaw Example
+
+```ts
+const client = createClient({ key: "chp_your_api_key" });
+
+await client.log({
+  agent_id: "openclaw.main",
+  event: "tool.errors.count",
+  value: 1,
+  meta: { tool_name: "browser.open" },
 });
+
+await client.log({
+  agent_id: "openclaw.main",
+  event: "task.duration_ms",
+  value: 780,
+  meta: { task_name: "daily_digest" },
+});
+
+const events = await client.listEvents();
+const toolErrors = events.find((eventDef) => eventDef.event === "tool.errors.count");
+
+if (toolErrors) {
+  await client.createPolicy({
+    event_id: toolErrors.event_id,
+    title: "OpenClaw tool errors spike",
+    condition: "gt",
+    threshold: 5,
+    enabled: true,
+    channel: "default",
+    period: "hour",
+    aggregate: "sum",
+    severity: "warning",
+  });
+
+  await client.getEventLogs(toolErrors.event_id, { period: "hour", limit: 24 });
+}
+
+await client.shutdown();
 ```
 
-## API Reference
+### `stop()`
 
-### Initialize
+Flushes pending logs and stops the SDK singleton.
 
-Initialize the Chirpier client with your API key and region. Find your API key in the Chirpier Integration page.
-
-```js
-initialize({ key: 'your-api-key', region: 'region' });
-```
-
-- `your-api-key` (str): Your Chirpier integration key
-- `region` (str): Your local region - options are `us-west`, `eu-west`, `asia-southeast`
-
-### Event
-
-All events emitted to Chirpier must have the following properties:
-
-```js
-event = {
-  group_id: '02e4f4d8-415e-4fc1-b01a-677ac5bc9207',
-  stream_name: 'My measurement',
-  value: 15.3,
-};
-```
-
-- `group_id` (str): UUID of the monitoring group
-- `stream_name` (str): Name of the measurement stream
-- `value` (float): Numeric value to record
-
-### Monitor
-
-Send an event to Chirpier using the `monitor` function.
-
-```js
-monitor(event);
-```
-
-## Test
-
-Run the test suite to ensure everything works as expected:
+## Testing
 
 ```bash
-npx jest
+npm test
 ```
 
-## Contributing
+## Connector Setup Examples
 
-We welcome contributions! To contribute:
+Create a Slack connector for OpenClaw alerts:
 
-1. Fork this repository.
-2. Create a new branch for your feature or bug fix.
-3. Submit a pull request with a clear explanation of your changes.
+```ts
+await axios.post(
+  "https://api.chirpier.co/v1.0/webhooks",
+  {
+    url: "https://hooks.slack.com/services/T000/B000/secret",
+    type: "slack",
+    enabled: true,
+  },
+  {
+    headers: { Authorization: `Bearer ${process.env.CHIRPIER_API_KEY}` },
+  }
+);
+```
 
-## License
+Create a Telegram connector for OpenClaw alerts:
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+```ts
+await axios.post(
+  "https://api.chirpier.co/v1.0/webhooks",
+  {
+    type: "telegram",
+    enabled: true,
+    credentials: {
+      bot_token: "123456:telegram-bot-token",
+      chat_id: "987654321",
+    },
+  },
+  {
+    headers: { Authorization: `Bearer ${process.env.CHIRPIER_API_KEY}` },
+  }
+);
+```
 
-## Support
+Send a test notification:
 
-If you encounter any problems or have any questions, please open an issue on the GitHub repository or contact us at <contact@chirpier.co>.
-
----
-
-Start tracking your events seamlessly with Chirpier SDK!
+```ts
+await client.testWebhook("whk_123");
+```
