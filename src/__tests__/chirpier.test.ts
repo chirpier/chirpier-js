@@ -134,7 +134,7 @@ describe("Chirpier SDK", () => {
       });
 
       const log: Log = {
-        agent_id: "api.worker",
+        agent: "api.worker",
         event: "request.finished",
         value: 1,
       };
@@ -146,14 +146,38 @@ describe("Chirpier SDK", () => {
       expect(mock.history.post[0].url).toBe(DEFAULT_API_ENDPOINT);
       expect(JSON.parse(mock.history.post[0].data)).toEqual([
         {
-          agent_id: "api.worker",
+          log_id: expect.any(String),
+          agent: "api.worker",
           event: "request.finished",
           value: 1,
         },
       ]);
+      expect(JSON.parse(mock.history.post[0].data)[0].log_id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      );
     });
 
-    test("agent_id whitespace should be omitted", async () => {
+    test("should preserve provided log_id", async () => {
+      const mock = new MockAdapter(axios);
+      mock.onPost(DEFAULT_API_ENDPOINT).reply(200, { success: true });
+
+      initialize({
+        key: "chp_log_id_key",
+        logLevel: LogLevel.None,
+      });
+
+      await logEvent({
+        log_id: "9f97d65f-fb30-4062-b4d0-8617c03fe4f6",
+        event: "request.finished",
+        value: 1,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const payload = JSON.parse(mock.history.post[0].data);
+      expect(payload[0].log_id).toBe("9f97d65f-fb30-4062-b4d0-8617c03fe4f6");
+    });
+
+    test("agent whitespace should be omitted", async () => {
       const mock = new MockAdapter(axios);
       mock.onPost(DEFAULT_API_ENDPOINT).reply(200, { success: true });
 
@@ -163,14 +187,14 @@ describe("Chirpier SDK", () => {
       });
 
       await logEvent({
-        agent_id: "   ",
+        agent: "   ",
         event: "metric.tick",
         value: 42,
       });
 
       await new Promise((resolve) => setTimeout(resolve, 2000));
       const payload = JSON.parse(mock.history.post[0].data);
-      expect(payload[0].agent_id).toBeUndefined();
+      expect(payload[0].agent).toBeUndefined();
     });
 
     test("should support meta payload", async () => {
@@ -183,7 +207,7 @@ describe("Chirpier SDK", () => {
       });
 
       await logEvent({
-        agent_id: "api.worker",
+        agent: "api.worker",
         event: "request.finished",
         value: 200,
         meta: {
@@ -248,6 +272,14 @@ describe("Chirpier SDK", () => {
           event: "too-future",
           value: 1,
           occurred_at: new Date(Date.now() + 25 * 60 * 60 * 1000),
+        })
+      ).rejects.toThrow(ChirpierError);
+
+      await expect(
+        logEvent({
+          log_id: "not-a-uuid",
+          event: "bad-log-id",
+          value: 1,
         })
       ).rejects.toThrow(ChirpierError);
 
@@ -322,6 +354,39 @@ describe("Chirpier SDK", () => {
       }
     });
 
+	  test("event, policy, alert, and destination helpers use servicer endpoints", async () => {
+		const mock = new MockAdapter(axios);
+		mock.onPost("https://api.chirpier.co/v1.0/events").reply(200, { event_id: "evt_123", event: "tool.errors.count", public: false, timezone: "UTC" });
+		mock.onGet("https://api.chirpier.co/v1.0/events/evt_123").reply(200, { event_id: "evt_123", event: "tool.errors.count", public: false, timezone: "UTC" });
+		mock.onGet("https://api.chirpier.co/v1.0/policies/pol_123").reply(200, { policy_id: "pol_123", event_id: "evt_123", title: "Policy", channel: "ops", period: "hour", aggregate: "sum", condition: "gt", threshold: 1, severity: "warning", enabled: true });
+		mock.onPut("https://api.chirpier.co/v1.0/policies/pol_123").reply(200, { policy_id: "pol_123", event_id: "evt_123", title: "Updated", channel: "ops", period: "hour", aggregate: "sum", condition: "gt", threshold: 1, severity: "warning", enabled: true });
+		mock.onGet("https://api.chirpier.co/v1.0/alerts/alrt_123").reply(200, { alert_id: "alrt_123", policy_id: "pol_123", event_id: "evt_123", event: "tool.errors.count", title: "Alert", channel: "ops", period: "hour", aggregate: "sum", condition: "gt", threshold: 1, severity: "warning", status: "triggered", value: 2, count: 2, min: 1, max: 1 });
+		mock.onGet("https://api.chirpier.co/v1.0/destinations").reply(200, []);
+		mock.onPost("https://api.chirpier.co/v1.0/destinations").reply(200, { destination_id: "dst_123", channel: "slack", scope: "all", enabled: true });
+		mock.onGet("https://api.chirpier.co/v1.0/destinations/dst_123").reply(200, { destination_id: "dst_123", channel: "slack", scope: "all", enabled: true });
+		mock.onPut("https://api.chirpier.co/v1.0/destinations/dst_123").reply(200, { destination_id: "dst_123", channel: "slack", scope: "all", enabled: false });
+
+		const client: Client = createClient({ key: "chp_client_route_key" });
+		try {
+		  const createdEvent = await client.createEvent({ event: "tool.errors.count" });
+		  expect(createdEvent.event_id).toBe("evt_123");
+		  await client.getEvent("evt_123");
+		  const policy = await client.getPolicy("pol_123");
+		  expect(policy.policy_id).toBe("pol_123");
+		  await client.updatePolicy("pol_123", { title: "Updated" });
+		  const alert = await client.getAlert("alrt_123");
+		  expect(alert.alert_id).toBe("alrt_123");
+		  await client.listDestinations();
+		  const destination = await client.createDestination({ channel: "slack", scope: "all", enabled: true });
+		  expect(destination.destination_id).toBe("dst_123");
+		  await client.getDestination("dst_123");
+		  const updatedDestination = await client.updateDestination("dst_123", { enabled: false });
+		  expect(updatedDestination.enabled).toBe(false);
+		} finally {
+		  await client.shutdown();
+		}
+	  });
+
     test("getAlertDeliveries uses pagination params", async () => {
       const mock = new MockAdapter(axios);
       mock.onGet("https://api.chirpier.co/v1.0/alerts/alrt_123/deliveries?kind=test&limit=20&offset=5").reply(200, []);
@@ -348,17 +413,46 @@ describe("Chirpier SDK", () => {
       }
     });
 
-    test("testWebhook posts to servicer endpoint", async () => {
+    test("testDestination posts to servicer endpoint", async () => {
       const mock = new MockAdapter(axios);
-      mock.onPost("https://api.chirpier.co/v1.0/webhooks/whk_123/test").reply(200);
+	  mock.onPost("https://api.chirpier.co/v1.0/destinations/whk_123/test").reply(200, {
+		alert_id: "alrt_123",
+		destination_id: "whk_123",
+		status: "sent",
+	  });
 
-      const client: Client = createClient({ key: "chp_client_webhook_key" });
+      const client: Client = createClient({ key: "chp_client_destination_key" });
       try {
-        await client.testWebhook("whk_123");
-        expect(mock.history.post[0].url).toBe("https://api.chirpier.co/v1.0/webhooks/whk_123/test");
+		const result = await client.testDestination("whk_123");
+		expect(result.alert_id).toBe("alrt_123");
+        expect(mock.history.post[0].url).toBe("https://api.chirpier.co/v1.0/destinations/whk_123/test");
       } finally {
         await client.shutdown();
       }
     });
+
+	  test("getEventAnalytics uses analytics endpoint", async () => {
+		const mock = new MockAdapter(axios);
+		mock.onGet("https://api.chirpier.co/v1.0/events/evt_123/analytics?view=window&period=1h&previous=previous_window").reply(200, {
+		  event_id: "evt_123",
+		  view: "window",
+		  period: "1h",
+		  previous: "previous_window",
+		  data: null,
+		});
+
+		const client: Client = createClient({ key: "chp_client_analytics_key" });
+		try {
+		  const analytics = await client.getEventAnalytics("evt_123", {
+			view: "window",
+			period: "1h",
+			previous: "previous_window",
+		  });
+		  expect(analytics.event_id).toBe("evt_123");
+		  expect(mock.history.get[0].url).toBe("https://api.chirpier.co/v1.0/events/evt_123/analytics?view=window&period=1h&previous=previous_window");
+		} finally {
+		  await client.shutdown();
+		}
+	  });
   });
 });

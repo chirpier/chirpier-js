@@ -6,11 +6,11 @@ import {
   DEFAULT_TIMEOUT,
   DEFAULT_BATCH_SIZE,
   DEFAULT_FLUSH_DELAY,
-  MAX_QUEUE_SIZE,
   DEFAULT_API_ENDPOINT,
   DEFAULT_SERVICER_ENDPOINT,
 } from "./constants";
 import AsyncLock from "async-lock";
+import { v7 as uuidv7 } from "uuid";
 
 // Define logging levels as const enum for better tree-shaking
 export const enum LogLevel {
@@ -38,27 +38,34 @@ export interface Config {
 export type Options = Config;
 
 export interface Log {
-  agent_id?: string;
+  log_id?: string;
+  agent?: string;
   event: string;
   value: number;
   meta?: unknown;
   occurred_at?: string | Date;
 }
 
-export interface EventDefinition {
+export interface Event {
 	readonly event_id: string;
-	readonly agent_id?: string;
+	readonly agent?: string;
 	readonly event: string;
 	readonly title?: string;
 	readonly public: boolean;
 	readonly description?: string;
 	readonly unit?: string;
-	readonly semantic_class: string;
-	readonly default_aggregate: string;
-	readonly enabled: boolean;
-	readonly origin: string;
-	readonly archived_at?: string;
+	readonly timezone: string;
 	readonly created_at?: string;
+}
+
+export interface CreateEventPayload {
+	agent?: string;
+	event: string;
+	title?: string;
+	public?: boolean;
+	description?: string;
+	unit?: string;
+	timezone?: string;
 }
 
 export interface Policy {
@@ -75,11 +82,15 @@ export interface Policy {
 	readonly enabled: boolean;
 }
 
+export type CreatePolicyPayload = Omit<Policy, "policy_id">;
+
+export type UpdatePolicyPayload = Partial<Omit<Policy, "policy_id">>;
+
 export interface Alert {
 	readonly alert_id: string;
 	readonly policy_id: string;
 	readonly event_id: string;
-	readonly agent_id?: string;
+	readonly agent?: string;
 	readonly event: string;
 	readonly title: string;
 	readonly period: string;
@@ -100,7 +111,7 @@ export interface Alert {
 export interface AlertDelivery {
 	readonly attempt_id: string;
 	readonly alert_id: string;
-	readonly webhook_id?: string;
+	readonly destination_id?: string;
 	readonly channel: string;
 	readonly target: string;
 	readonly status: string;
@@ -109,9 +120,23 @@ export interface AlertDelivery {
 	readonly created_at: string;
 }
 
+export interface Destination {
+	readonly destination_id: string;
+	readonly channel: string;
+	readonly url?: string;
+	readonly credentials?: Record<string, unknown>;
+	readonly scope: string;
+	readonly policy_ids?: string[];
+	readonly enabled: boolean;
+}
+
+export type CreateDestinationPayload = Omit<Destination, "destination_id">;
+
+export type UpdateDestinationPayload = Partial<Omit<Destination, "destination_id">>;
+
 export interface EventLogPoint {
 	readonly event_id: string;
-	readonly agent_id?: string;
+	readonly agent?: string;
 	readonly event: string;
 	readonly period: string;
 	readonly occurred_at: string;
@@ -120,6 +145,43 @@ export interface EventLogPoint {
 	readonly squares: number;
 	readonly min: number;
 	readonly max: number;
+}
+
+export interface AnalyticsWindowQuery {
+	view: "window";
+	period: "1h" | "1d" | "7d" | "1m";
+	previous: "previous_window" | "previous_1d" | "previous_7d" | "previous_1m";
+}
+
+export interface AnalyticsWindowData {
+	readonly current_value: number;
+	readonly current_count: number;
+	readonly previous_value: number;
+	readonly previous_count: number;
+	readonly value_delta: number;
+	readonly count_delta: number;
+	readonly value_pct_change: number;
+	readonly count_pct_change: number;
+	readonly current_mean: number;
+	readonly previous_mean: number;
+	readonly mean_delta: number;
+	readonly mean_pct_change: number;
+	readonly current_stddev: number;
+	readonly previous_stddev: number;
+}
+
+export interface AnalyticsWindowResponse {
+	readonly event_id: string;
+	readonly view: "window";
+	readonly period: "1h" | "1d" | "7d" | "1m";
+	readonly previous: "previous_window" | "previous_1d" | "previous_7d" | "previous_1m";
+	readonly data: AnalyticsWindowData | null;
+}
+
+export interface DestinationTestResult {
+	readonly alert_id: string;
+	readonly destination_id: string;
+	readonly status: string;
 }
 
 export interface PaginationOptions {
@@ -145,7 +207,6 @@ export class ChirpierError extends Error {
 interface QueuedLog {
   readonly log: Log;
   readonly timestamp: number;
-  retryCount: number;
 }
 
 export class Client {
@@ -158,7 +219,6 @@ export class Client {
   private logQueue: QueuedLog[] = [];
   private readonly batchSize: number;
   private readonly flushDelay: number;
-  private readonly maxQueueSize: number;
   private flushTimeoutId: NodeJS.Timeout | null = null;
   private readonly queueLock: AsyncLock;
   private readonly flushLock: AsyncLock;
@@ -174,7 +234,7 @@ export class Client {
       timeout = DEFAULT_TIMEOUT,
       batchSize = DEFAULT_BATCH_SIZE,
       flushDelay = DEFAULT_FLUSH_DELAY,
-      maxQueueSize = MAX_QUEUE_SIZE,
+      maxQueueSize,
     } = options;
 
     const key = resolveAPIKey(providedKey);
@@ -226,10 +286,6 @@ export class Client {
     if (flushDelay < 0) {
       throw new ChirpierError("Flush delay must be non-negative", "INVALID_FLUSH_DELAY");
     }
-    if (maxQueueSize <= 0 || !Number.isInteger(maxQueueSize)) {
-      throw new ChirpierError("Max queue size must be a positive integer", "INVALID_QUEUE_SIZE");
-    }
-
     this.apiEndpoint = apiEndpoint ?? DEFAULT_API_ENDPOINT;
     this.servicerEndpoint = servicerEndpoint ?? DEFAULT_SERVICER_ENDPOINT;
     this.apiKey = key;
@@ -237,11 +293,11 @@ export class Client {
     this.timeout = timeout;
     this.batchSize = batchSize;
     this.flushDelay = flushDelay;
-    this.maxQueueSize = maxQueueSize;
     this.logLevel = logLevel;
 
-    this.queueLock = new AsyncLock({ maxPending: this.maxQueueSize });
-    this.flushLock = new AsyncLock({ maxPending: this.maxQueueSize });
+    void maxQueueSize;
+    this.queueLock = new AsyncLock();
+    this.flushLock = new AsyncLock();
 
     this.axiosInstance = axios.create({
       headers: { Authorization: `Bearer ${this.apiKey}` },
@@ -280,11 +336,22 @@ export class Client {
       return false;
     }
 
+    if (log.log_id !== undefined) {
+      if (typeof log.log_id !== "string") {
+        return false;
+      }
+
+      const trimmedLogID = log.log_id.trim();
+      if (trimmedLogID.length > 0 && !isUUID(trimmedLogID)) {
+        return false;
+      }
+    }
+
     if (typeof log.value !== "number" || !Number.isFinite(log.value)) {
       return false;
     }
 
-    if (log.agent_id !== undefined && typeof log.agent_id !== "string") {
+    if (log.agent !== undefined && typeof log.agent !== "string") {
       return false;
     }
 
@@ -319,14 +386,15 @@ export class Client {
 
   private normalizeLog(log: Log): Log {
     const normalizedLog: Log = {
+      log_id: resolveLogID(log.log_id),
       event: log.event.trim(),
       value: log.value,
     };
 
-    if (typeof log.agent_id === "string") {
-      const trimmedAgentID = log.agent_id.trim();
-      if (trimmedAgentID.length > 0) {
-        normalizedLog.agent_id = trimmedAgentID;
+    if (typeof log.agent === "string") {
+      const trimmedAgent = log.agent.trim();
+      if (trimmedAgent.length > 0) {
+        normalizedLog.agent = trimmedAgent;
       }
     }
 
@@ -346,30 +414,16 @@ export class Client {
   public async log(log: Log): Promise<void> {
     if (!this.isValidLog(log)) {
       throw new ChirpierError(
-        "Invalid log format: event must not be empty, value must be a finite number, agent_id must be a string when provided, meta must be JSON-encodable, and occurred_at must be within the last 30 days and no more than 1 day in the future",
+        "Invalid log format: log_id must be a UUID when provided, event must not be empty, value must be a finite number, agent must be a string when provided, meta must be JSON-encodable, and occurred_at must be within the last 30 days and no more than 1 day in the future",
         "INVALID_LOG"
       );
     }
 
     const normalizedLog = this.normalizeLog(log);
 
-    let queueFull = false;
-
     await this.queueLock.acquire("queue", async () => {
-      if (this.logQueue.length >= this.maxQueueSize) {
-        queueFull = true;
-        return;
-      }
-
-      this.logQueue.push({ log: normalizedLog, timestamp: Date.now(), retryCount: 0 });
+      this.logQueue.push({ log: normalizedLog, timestamp: Date.now() });
     });
-
-    if (queueFull) {
-      throw new ChirpierError(
-        `Log queue is full (max size: ${this.maxQueueSize})`,
-        "QUEUE_FULL"
-      );
-    }
 
     if (this.logQueue.length >= this.batchSize) {
       await this.flushQueue();
@@ -412,24 +466,8 @@ export class Client {
           console.error("Failed to send logs:", error);
         }
 
-        const retryableLogs: QueuedLog[] = [];
-        for (const queuedLog of logsToSend) {
-          if (queuedLog.retryCount >= this.retries) {
-            if (this.logLevel >= LogLevel.Error) {
-              console.error(
-                `Dropping log after ${this.retries} retries:`,
-                queuedLog.log
-              );
-            }
-            continue;
-          }
-
-          queuedLog.retryCount++;
-          retryableLogs.push(queuedLog);
-        }
-
         await this.queueLock.acquire("logQueue", async () => {
-          this.logQueue = [...retryableLogs, ...this.logQueue];
+          this.logQueue = [...logsToSend, ...this.logQueue];
         });
       }
     });
@@ -456,21 +494,26 @@ export class Client {
     await this.shutdown();
   }
 
-  public async listEvents(): Promise<EventDefinition[]> {
-	const response = await this.axiosInstance.get<EventDefinition[]>(`${this.servicerEndpoint}/events`);
+  public async listEvents(): Promise<Event[]> {
+	const response = await this.axiosInstance.get<Event[]>(`${this.servicerEndpoint}/events`);
 	return response.data;
   }
 
-  public async getEvent(eventID: string): Promise<EventDefinition> {
-	const response = await this.axiosInstance.get<EventDefinition>(`${this.servicerEndpoint}/events/${eventID}`);
+  public async createEvent(payload: CreateEventPayload): Promise<Event> {
+	const response = await this.axiosInstance.post<Event>(`${this.servicerEndpoint}/events`, payload);
+	return response.data;
+  }
+
+  public async getEvent(eventID: string): Promise<Event> {
+	const response = await this.axiosInstance.get<Event>(`${this.servicerEndpoint}/events/${eventID}`);
 	return response.data;
   }
 
   public async updateEvent(
 	eventID: string,
-	payload: Partial<Omit<EventDefinition, "event_id" | "created_at">>
-  ): Promise<EventDefinition> {
-	const response = await this.axiosInstance.put<EventDefinition>(
+	payload: Partial<Omit<Event, "event_id" | "created_at">>
+  ): Promise<Event> {
+	const response = await this.axiosInstance.put<Event>(
 		`${this.servicerEndpoint}/events/${eventID}`,
 		payload
 	);
@@ -482,8 +525,18 @@ export class Client {
 	return response.data;
   }
 
-  public async createPolicy(payload: Omit<Policy, "policy_id">): Promise<Policy> {
+  public async getPolicy(policyID: string): Promise<Policy> {
+	const response = await this.axiosInstance.get<Policy>(`${this.servicerEndpoint}/policies/${policyID}`);
+	return response.data;
+  }
+
+  public async createPolicy(payload: CreatePolicyPayload): Promise<Policy> {
 	const response = await this.axiosInstance.post<Policy>(`${this.servicerEndpoint}/policies`, payload);
+	return response.data;
+  }
+
+  public async updatePolicy(policyID: string, payload: UpdatePolicyPayload): Promise<Policy> {
+	const response = await this.axiosInstance.put<Policy>(`${this.servicerEndpoint}/policies/${policyID}`, payload);
 	return response.data;
   }
 
@@ -492,6 +545,11 @@ export class Client {
 		? `${this.servicerEndpoint}/alerts?status=${encodeURIComponent(status)}`
 		: `${this.servicerEndpoint}/alerts`;
 	const response = await this.axiosInstance.get<Alert[]>(endpoint);
+	return response.data;
+  }
+
+  public async getAlert(alertID: string): Promise<Alert> {
+	const response = await this.axiosInstance.get<Alert>(`${this.servicerEndpoint}/alerts/${alertID}`);
 	return response.data;
   }
 
@@ -521,8 +579,29 @@ export class Client {
 	return response.data;
   }
 
-  public async testWebhook(webhookID: string): Promise<void> {
-	await this.axiosInstance.post(`${this.servicerEndpoint}/webhooks/${webhookID}/test`);
+  public async listDestinations(): Promise<Destination[]> {
+	const response = await this.axiosInstance.get<Destination[]>(`${this.servicerEndpoint}/destinations`);
+	return response.data;
+  }
+
+  public async createDestination(payload: CreateDestinationPayload): Promise<Destination> {
+	const response = await this.axiosInstance.post<Destination>(`${this.servicerEndpoint}/destinations`, payload);
+	return response.data;
+  }
+
+  public async getDestination(destinationID: string): Promise<Destination> {
+	const response = await this.axiosInstance.get<Destination>(`${this.servicerEndpoint}/destinations/${destinationID}`);
+	return response.data;
+  }
+
+  public async updateDestination(destinationID: string, payload: UpdateDestinationPayload): Promise<Destination> {
+	const response = await this.axiosInstance.put<Destination>(`${this.servicerEndpoint}/destinations/${destinationID}`, payload);
+	return response.data;
+  }
+
+  public async testDestination(destinationID: string): Promise<DestinationTestResult> {
+	const response = await this.axiosInstance.post<DestinationTestResult>(`${this.servicerEndpoint}/destinations/${destinationID}/test`);
+	return response.data;
   }
 
   public async getEventLogs(eventID: string, options: PaginationOptions = {}): Promise<EventLogPoint[]> {
@@ -538,6 +617,15 @@ export class Client {
 	}
 	const suffix = params.toString() ? `?${params.toString()}` : "";
 	const response = await this.axiosInstance.get<EventLogPoint[]>(`${this.servicerEndpoint}/events/${eventID}/logs${suffix}`);
+	return response.data;
+  }
+
+  public async getEventAnalytics(eventID: string, query: AnalyticsWindowQuery): Promise<AnalyticsWindowResponse> {
+	const params = new URLSearchParams();
+	params.set("view", query.view);
+	params.set("period", query.period);
+	params.set("previous", query.previous);
+	const response = await this.axiosInstance.get<AnalyticsWindowResponse>(`${this.servicerEndpoint}/events/${eventID}/analytics?${params.toString()}`);
 	return response.data;
   }
 
@@ -560,6 +648,21 @@ function isNodeEnvironment(): boolean {
 
 function isValidAPIKey(token: string): boolean {
   return token.startsWith("chp_") && token.length > "chp_".length;
+}
+
+function isUUID(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function resolveLogID(logID?: string): string {
+  if (typeof logID === "string") {
+    const trimmedLogID = logID.trim();
+    if (trimmedLogID.length > 0) {
+      return trimmedLogID;
+    }
+  }
+
+  return uuidv7();
 }
 
 function loadDotEnvKey(): string | undefined {
