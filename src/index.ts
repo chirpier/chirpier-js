@@ -204,6 +204,99 @@ export class ChirpierError extends Error {
   }
 }
 
+type LogRetryPolicy = "success" | "retryable" | "retry_after" | "non_retryable";
+
+function classifyLogResponseStatus(status?: number): LogRetryPolicy {
+  if (status === undefined) {
+    return "success";
+  }
+
+  if (status === 429) {
+    return "retry_after";
+  }
+
+  if (status >= 500) {
+    if (status === 500 || status === 503) {
+      return "non_retryable";
+    }
+
+    return "retryable";
+  }
+
+  if (status >= 400) {
+    return "non_retryable";
+  }
+
+  return "success";
+}
+
+function getChirpierResponseMessage(data: unknown): string | undefined {
+  if (typeof data === "string") {
+    const trimmed = data.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim().length > 0) {
+      return record.message.trim();
+    }
+
+    if (typeof record.error === "string" && record.error.trim().length > 0) {
+      return record.error.trim();
+    }
+
+    try {
+      return JSON.stringify(data);
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function getRetryDelayMs(retryCount: number, error: unknown): number {
+  if (axios.isAxiosError(error) && error.response?.status === 429) {
+    const retryAfterHeader = error.response.headers?.["retry-after"];
+    const retryAfterSeconds = Number(retryAfterHeader);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+      return retryAfterSeconds * 1000;
+    }
+  }
+
+  const baseDelay = Math.pow(2, retryCount) * 1000;
+  const jitter = Math.random() * 0.3 * baseDelay;
+  return baseDelay + jitter;
+}
+
+function normalizeSendLogsError(error: unknown, logLevel: LogLevel): unknown {
+  if (!axios.isAxiosError(error)) {
+    return error;
+  }
+
+  const status = error.response?.status;
+  if (classifyLogResponseStatus(status) !== "non_retryable") {
+    return error;
+  }
+
+  const responseMessage = getChirpierResponseMessage(error.response?.data);
+  if ((status === 401 || status === 403) && logLevel >= LogLevel.Error) {
+    if (responseMessage) {
+      console.error(`Chirpier API returned ${status}: ${responseMessage}`);
+    } else {
+      console.error(`Chirpier API returned ${status}`);
+    }
+  }
+
+  const message = responseMessage ? `HTTP ${status}: ${responseMessage}` : `HTTP ${status}`;
+  return new ChirpierError(message, "NON_RETRYABLE_RESPONSE");
+}
+
+function isNonRetryableLogError(error: unknown): error is ChirpierError {
+  return error instanceof ChirpierError && error.code === "NON_RETRYABLE_RESPONSE";
+}
+
 interface QueuedLog {
   readonly log: Log;
   readonly timestamp: number;
@@ -311,17 +404,15 @@ export class Client {
 
     axiosRetry(this.axiosInstance, {
       retries: this.retries,
-      retryDelay: (retryCount) => {
-        const baseDelay = Math.pow(2, retryCount) * 1000;
-        const jitter = Math.random() * 0.3 * baseDelay;
-        return baseDelay + jitter;
-      },
+      retryDelay: (retryCount, error) => getRetryDelayMs(retryCount, error),
       retryCondition: (error) => {
-        return (
-          axiosRetry.isNetworkError(error) ||
-          axiosRetry.isRetryableError(error) ||
-          (error.response && error.response.status) === 429
-        );
+        if (axiosRetry.isNetworkError(error)) {
+          return true;
+        }
+
+        const status = error.response?.status;
+        const retryPolicy = classifyLogResponseStatus(status);
+        return retryPolicy === "retryable" || retryPolicy === "retry_after";
       },
       shouldResetTimeout: true,
     });
@@ -466,6 +557,13 @@ export class Client {
           console.error("Failed to send logs:", error);
         }
 
+        if (isNonRetryableLogError(error)) {
+          if (this.logLevel >= LogLevel.Error) {
+            console.error("Dropping logs after non-retryable response from API");
+          }
+          return;
+        }
+
         await this.queueLock.acquire("logQueue", async () => {
           this.logQueue = [...logsToSend, ...this.logQueue];
         });
@@ -474,7 +572,11 @@ export class Client {
   }
 
   private async sendLogs(logs: Log[]): Promise<void> {
-    await this.axiosInstance.post(this.apiEndpoint, logs);
+    try {
+      await this.axiosInstance.post(this.apiEndpoint, logs);
+    } catch (error) {
+      throw normalizeSendLogsError(error, this.logLevel);
+    }
   }
 
   public async flush(): Promise<void> {

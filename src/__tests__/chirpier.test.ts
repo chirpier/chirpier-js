@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import axios from "axios";
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from "axios";
 import MockAdapter from "axios-mock-adapter";
 import {
   Client,
@@ -20,6 +20,8 @@ import {
 
 describe("Chirpier SDK", () => {
   afterEach(async () => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
     await stop();
   });
 
@@ -339,6 +341,203 @@ describe("Chirpier SDK", () => {
       await flush();
       expect(mock.history.post.length).toBe(1);
       expect(JSON.parse(mock.history.post[0].data)[0].event).toBe("queued.before.flush");
+    });
+
+    test("retries network errors", async () => {
+      jest.useFakeTimers();
+      const client: Client = createClient({
+        key: "chp_network_retry_key",
+        retries: 2,
+        flushDelay: 10000,
+      });
+      const axiosBackedClient = client as unknown as { axiosInstance: AxiosInstance };
+      let attempts = 0;
+      axiosBackedClient.axiosInstance.defaults.adapter = async (
+        config: AxiosRequestConfig
+      ): Promise<AxiosResponse> => {
+        attempts += 1;
+        if (attempts < 3) {
+          throw Object.assign(new Error("Network Error"), {
+            code: "ECONNRESET",
+            config,
+          });
+        }
+
+        return {
+          data: { success: true },
+          status: 200,
+          statusText: "OK",
+          headers: {},
+          config,
+        };
+      };
+
+      try {
+        await client.log({ event: "network.retry", value: 1 });
+        const flushPromise = client.flush();
+        await jest.runAllTimersAsync();
+        await expect(flushPromise).resolves.toBeUndefined();
+        expect(attempts).toBe(3);
+      } finally {
+        await client.shutdown();
+      }
+    });
+
+    test("retries 429 responses", async () => {
+      jest.useFakeTimers();
+      const mock = new MockAdapter(axios);
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(429, { error: "rate limited" }, { "retry-after": "1" });
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(429, { error: "rate limited" }, { "retry-after": "1" });
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(200, { success: true });
+
+      const client: Client = createClient({
+        key: "chp_rate_limit_key",
+        retries: 2,
+        flushDelay: 10000,
+      });
+
+      try {
+        await client.log({ event: "rate.limit", value: 1 });
+        const flushPromise = client.flush();
+        await jest.runAllTimersAsync();
+        await expect(flushPromise).resolves.toBeUndefined();
+        expect(mock.history.post.length).toBe(3);
+      } finally {
+        await client.shutdown();
+      }
+    });
+
+    test("does not retry 401 and logs the Chirpier response message", async () => {
+      const mock = new MockAdapter(axios);
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(401, { error: "invalid api key" });
+
+      const client: Client = createClient({
+        key: "chp_unauthorized_key",
+        retries: 3,
+        flushDelay: 10000,
+        logLevel: LogLevel.Error,
+      });
+
+      try {
+        await client.log({ event: "auth.failed", value: 1 });
+        await client.flush();
+        await client.flush();
+
+        expect(mock.history.post.length).toBe(1);
+        expect(errorSpy).toHaveBeenCalledWith("Chirpier API returned 401: invalid api key");
+      } finally {
+        await client.shutdown();
+      }
+    });
+
+    test("does not retry 403 and logs the Chirpier response message", async () => {
+      const mock = new MockAdapter(axios);
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(403, { message: "project is disabled" });
+
+      const client: Client = createClient({
+        key: "chp_forbidden_key",
+        retries: 3,
+        flushDelay: 10000,
+        logLevel: LogLevel.Error,
+      });
+
+      try {
+        await client.log({ event: "auth.forbidden", value: 1 });
+        await client.flush();
+        await client.flush();
+
+        expect(mock.history.post.length).toBe(1);
+        expect(errorSpy).toHaveBeenCalledWith("Chirpier API returned 403: project is disabled");
+      } finally {
+        await client.shutdown();
+      }
+    });
+
+    test.each([404, 500, 503])( "does not retry non-retryable status %s", async (status) => {
+      const mock = new MockAdapter(axios);
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(status, { error: `http ${status}` });
+
+      const client: Client = createClient({
+        key: `chp_non_retryable_${status}`,
+        retries: 3,
+        flushDelay: 10000,
+      });
+
+      try {
+        await client.log({ event: `non.retryable.${status}`, value: 1 });
+        await client.flush();
+        await client.flush();
+
+        expect(mock.history.post.length).toBe(1);
+      } finally {
+        await client.shutdown();
+      }
+    });
+
+    test("retries 502 responses", async () => {
+      jest.useFakeTimers();
+      const mock = new MockAdapter(axios);
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(502, { error: "bad gateway" });
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(502, { error: "bad gateway" });
+      mock.onPost(DEFAULT_API_ENDPOINT).replyOnce(200, { success: true });
+
+      const client: Client = createClient({
+        key: "chp_bad_gateway_key",
+        retries: 2,
+        flushDelay: 10000,
+      });
+
+      try {
+        await client.log({ event: "bad.gateway", value: 1 });
+        const flushPromise = client.flush();
+        await jest.runAllTimersAsync();
+        await expect(flushPromise).resolves.toBeUndefined();
+        expect(mock.history.post.length).toBe(3);
+      } finally {
+        await client.shutdown();
+      }
+    });
+
+    test("flush requeues only retryable failures", async () => {
+      const retryableMock = new MockAdapter(axios);
+      retryableMock.onPost(DEFAULT_API_ENDPOINT).replyOnce(502, { error: "bad gateway" });
+      retryableMock.onPost(DEFAULT_API_ENDPOINT).replyOnce(200, { success: true });
+
+      const retryableClient: Client = createClient({
+        key: "chp_retryable_requeue_key",
+        retries: 0,
+        flushDelay: 10000,
+      });
+
+      try {
+        await retryableClient.log({ event: "retryable.requeue", value: 1 });
+        await retryableClient.flush();
+        await retryableClient.flush();
+        expect(retryableMock.history.post.length).toBe(2);
+      } finally {
+        await retryableClient.shutdown();
+      }
+
+      const nonRetryableMock = new MockAdapter(axios);
+      nonRetryableMock.onPost(DEFAULT_API_ENDPOINT).replyOnce(404, { error: "not found" });
+
+      const nonRetryableClient: Client = createClient({
+        key: "chp_non_retryable_requeue_key",
+        retries: 0,
+        flushDelay: 10000,
+        logLevel: LogLevel.None,
+      });
+
+      try {
+        await nonRetryableClient.log({ event: "non.retryable.drop", value: 1 });
+        await nonRetryableClient.flush();
+        await nonRetryableClient.flush();
+        expect(nonRetryableMock.history.post.length).toBe(1);
+      } finally {
+        await nonRetryableClient.shutdown();
+      }
     });
 
     test("getEventLogs uses servicer endpoint with period, limit, and offset", async () => {

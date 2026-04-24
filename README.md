@@ -76,6 +76,11 @@ Default servicer endpoint is `https://api.chirpier.co/v1.0`.
 The same bearer token is used for both ingest and servicer APIs.
 Queued logs are not dropped locally because of queue capacity or retry exhaustion.
 
+### Retry behavior
+
+The SDK retries network/transport failures, `429` responses, and retryable `5xx` responses such as `502` and `504`.
+It does not retry `401`, `403`, `404`, `500`, or `503`, and `401`/`403` errors surface the Chirpier response message when available.
+
 ### `logEvent(log)`
 
 Queues a log for batched delivery.
